@@ -139,7 +139,6 @@ def add_custom_css():
 # Chame assim no início do app:
 add_custom_css()
 
-
 def _warn_once(msg: str, key: str = "_cdi_fallback_warned"):
     # Evita flood de mensagens no Streamlit
     if not st.session_state.get(key, False):
@@ -296,7 +295,7 @@ def apply_exceptions_to_pdf_idx(pdf_idx: pd.DataFrame, exc: pd.DataFrame) -> pd.
                 e2[col_pdf] = e[col_exc]
             else:
                 e2[col_pdf] = pd.Series(index=e.index, dtype="object")
-
+                
         # normaliza tokens de limpeza
         clear_tokens = {"", "-", "NA", "N/A", "APAGAR", "CLEAR"}
         for col_exc, col_pdf in colmap:
