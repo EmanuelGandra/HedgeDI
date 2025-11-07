@@ -27,13 +27,13 @@ from unidecode import unidecode
 
 # ========================= Paths / Config =========================
 CONTROLE_XLSX = Path("Dados/ativos_mapeados_para_controle.xlsx")   # entrada
-MATRIZ_XLSX   = Path("Dados/Matriz de Curvas 10102025.xlsx")             # matriz de curvas
+MATRIZ_XLSX   = Path("Dados/Matriz de Curvas 31102025.xlsx")             # matriz de curvas
 OUT_FINAL_XLSX = Path("Dados/ativos_mapeados_com_taxa_efetiva.xlsx")
 OUT_SEM_TAXA_XLSX = Path("Dados/ativos_sem_taxa.xlsx")
 
 # Diretório da árvore de carteiras diárias (BTG)
 BASE_DIR = Path(r"Z:\Asset Management")  # ajuste se necessário
-SPECIFIC_DATE = pd.Timestamp("2025-10-17")            # <- Data que será inserida no campo #Data quando o toggle estiver ligado
+SPECIFIC_DATE = pd.Timestamp("2025-10-31")            # <- Data que será inserida no campo #Data quando o toggle estiver ligado
 
 # DEBUG
 DEBUG = True
@@ -72,6 +72,31 @@ def _num(val):
         return float(s)
     except Exception:
         return np.nan
+
+def _infer_subclasse(row: pd.Series) -> str:
+    sc = norm_text(row.get("Sub Classe", ""))
+    codxp = str(row.get("COD_XP", "")).upper()
+    ativo = str(row.get("Ativo", "")).upper()
+
+    # 1) Se já for específico, mantém
+    if any(tag in sc for tag in ["CDB","LFSN","LFSC","LF","LC","CRI","CRA","DEB"]):
+        return row.get("Sub Classe","")
+
+    # 2) Derivar pelo COD_XP/Ativo
+    if "CDB" in codxp or " CDB" in f" {ativo} ":
+        return "CDB"
+    if re.search(r"\bLFSN\b", ativo): return "LFSN"
+    if re.search(r"\bLFSC\b", ativo): return "LFSC"
+    if re.search(r"\bLF\b",   ativo): return "LF"
+    if "LC" in ativo: return "LC"
+
+    # 3) Se vier "TÍTULOS PRIVADOS", troca por algo plausível (ex.: CDB)
+    if "TITUL" in sc and "PRIV" in sc:
+        return "CDB"
+
+    return row.get("Sub Classe","")
+
+
 
 # ========================= Mapeamento de Fundos (nomes de pasta/arquivo) =========================
 # Mapa fornecido: chaves = como vem no CONTROLE, valores = nome usado no arquivo/pasta
@@ -143,6 +168,37 @@ def is_btg_fund(nome: str) -> bool:
 CAL_B3 = mcal.get_calendar("B3")
 MESES_PT = {"01":"Janeiro","02":"Fevereiro","03":"Março","04":"Abril","05":"Maio","06":"Junho",
             "07":"Julho","08":"Agosto","09":"Setembro","10":"Outubro","11":"Novembro","12":"Dezembro"}
+
+def taxas_isin_no_ultimo_dia(fundo: str,
+                              d_ini: str,
+                              d_fim: str) -> tuple[pd.Timestamp | None, pd.Series]:
+    """
+    Retorna (data_ultimo_dia_com_isin, mapa_taxas_por_isin)
+    O 'último dia' aqui é o último DIA ÚTIL <= d_fim que realmente contenha
+    a seção com ISIN e Coupon (não basta existir o arquivo).
+    """
+    # Garante limites coerentes
+    d_ini = pd.to_datetime(d_ini).date().isoformat()
+    d_fim = pd.to_datetime(d_fim).date().isoformat()
+
+    # Anda para trás no calendário da B3
+    for dt in CAL_B3.schedule(d_ini, d_fim).index[::-1]:
+        dt = pd.Timestamp(dt)
+        p = _path_fund(fundo, dt)
+        if p is None:
+            continue
+
+        # Tenta extrair ISIN↔cupom desse dia
+        df_tax = parse_tp_taxas_isin(p, fundo, dt)
+        if not df_tax.empty:
+            # Mapa {ISIN: taxa_frac}
+            mapa = df_tax.set_index("isin")["tax"].astype(float)
+            if mapa.notna().any():
+                return dt.normalize(), mapa
+
+    # Nada encontrado no intervalo
+    return None, pd.Series(dtype=float)
+
 
 def _path_fund(fund: str, dt: pd.Timestamp) -> Path | None:
     """
@@ -260,6 +316,7 @@ KNOWN_MAP = {
     "BANCO VOLKSWAGEN S/A": "Banco Volkswagen",
     "PARANA BANCO S.A.": "Paraná Banco",
     "BANCO RANDON": "Banco Randon",
+    "BANCO XP" : "Xp investimentos"
 }
 STOPWORDS = {"S","SA","S.A","BANCO","DO","DA","DE","DEL","BRASIL"}
 
@@ -472,12 +529,22 @@ def main():
     dados["Modo_matriz"]   = None
     dados["Coluna_usada"]  = None
 
+    dados["Sub Classe"] = dados.apply(_infer_subclasse, axis=1)
+
+
     for idx, row in dados.iterrows():
         subc = row.get("Sub Classe","")
         emissor = row.get("Emissor","")
         venc = pd.to_datetime(row.get("Vencimento do ativo"), dayfirst=True, errors="coerce")
         du = du_b3(hoje, venc) if not pd.isna(venc) else np.nan
         sheet = escolhe_sheet(subc)
+        if sheet is None:
+            # tenta uma escolha básica por palavra-chave
+            s = norm_text(subc)
+            if "CDB" in s: sheet = "CDB PERCENTUAL"
+            elif "LFSC" in s: sheet = "LFSC PERCENTUAL"
+            elif "LFSN" in s: sheet = "LFSN PERCENTUAL"
+            elif re.search(r"\bLF\b", s): sheet = "LF PERCENTUAL"
         banco = emissor_para_banco(emissor, mapa_bancos)
 
         rating = np.nan
